@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::{
@@ -78,6 +79,8 @@ struct App {
     focus: Focus,
     steps: [StepState; STEP_COUNT],
     status_lines: Vec<String>,
+    path_completions: Vec<String>,
+    selected_completion: usize,
 }
 
 impl Default for App {
@@ -97,11 +100,34 @@ impl Default for App {
             status_lines: vec![
                 "Ready. Use Tab/Shift+Tab to navigate, Enter to run action, q to quit.".to_string(),
             ],
+            path_completions: Vec::new(),
+            selected_completion: 0,
         }
     }
 }
 
 impl App {
+    fn is_path_focus(&self) -> bool {
+        matches!(
+            self.focus,
+            Focus::SocketPath | Focus::LogPath | Focus::KernelImage | Focus::Rootfs
+        )
+    }
+
+    fn focused_value(&self) -> Option<&str> {
+        match self.focus {
+            Focus::SocketPath => Some(&self.socket_path),
+            Focus::LogPath => Some(&self.log_path),
+            Focus::KernelImage => Some(&self.kernel_image),
+            Focus::KernelArgs => Some(&self.kernel_args),
+            Focus::Rootfs => Some(&self.rootfs_path),
+            Focus::IfaceId => Some(&self.iface_id),
+            Focus::GuestMac => Some(&self.guest_mac),
+            Focus::HostDevName => Some(&self.host_dev_name),
+            _ => None,
+        }
+    }
+
     fn focused_value_mut(&mut self) -> Option<&mut String> {
         match self.focus {
             Focus::SocketPath => Some(&mut self.socket_path),
@@ -114,6 +140,109 @@ impl App {
             Focus::HostDevName => Some(&mut self.host_dev_name),
             _ => None,
         }
+    }
+
+    fn has_visible_completions(&self) -> bool {
+        self.is_path_focus() && !self.path_completions.is_empty()
+    }
+
+    fn completion_base_and_prefix(input: &str) -> (PathBuf, String) {
+        if input.is_empty() {
+            return (PathBuf::from("."), String::new());
+        }
+
+        if input.ends_with('/') {
+            return (PathBuf::from(input), String::new());
+        }
+
+        let path = Path::new(input);
+        match (path.parent(), path.file_name()) {
+            (Some(parent), Some(file_name)) if !parent.as_os_str().is_empty() => (
+                parent.to_path_buf(),
+                file_name.to_string_lossy().to_string(),
+            ),
+            _ => (PathBuf::from("."), input.to_string()),
+        }
+    }
+
+    fn update_path_completions(&mut self) {
+        self.path_completions.clear();
+        self.selected_completion = 0;
+
+        if !self.is_path_focus() {
+            return;
+        }
+
+        let Some(current_value) = self.focused_value() else {
+            return;
+        };
+
+        let (base_dir, prefix) = Self::completion_base_and_prefix(current_value);
+        let dir_for_scan = if base_dir.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            base_dir.clone()
+        };
+
+        let Ok(entries) = std::fs::read_dir(&dir_for_scan) else {
+            return;
+        };
+
+        let mut results = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            if !prefix.is_empty() && !name.starts_with(&prefix) {
+                continue;
+            }
+
+            let mut candidate = if base_dir == Path::new(".") {
+                name
+            } else {
+                format!("{}/{}", base_dir.display(), name)
+            };
+
+            if file_type.is_dir() {
+                candidate.push('/');
+            }
+
+            results.push(candidate);
+        }
+
+        results.sort();
+        self.path_completions = results;
+    }
+
+    fn select_next_completion(&mut self) {
+        if self.path_completions.is_empty() {
+            return;
+        }
+        self.selected_completion = (self.selected_completion + 1) % self.path_completions.len();
+    }
+
+    fn select_prev_completion(&mut self) {
+        if self.path_completions.is_empty() {
+            return;
+        }
+        self.selected_completion = if self.selected_completion == 0 {
+            self.path_completions.len() - 1
+        } else {
+            self.selected_completion - 1
+        };
+    }
+
+    fn apply_selected_completion(&mut self) {
+        let Some(selected) = self.path_completions.get(self.selected_completion).cloned() else {
+            return;
+        };
+
+        if let Some(current) = self.focused_value_mut() {
+            *current = selected;
+        }
+        self.update_path_completions();
     }
 
     fn push_status(&mut self, message: impl Into<String>) {
@@ -310,7 +439,8 @@ fn send_json_request(
     let body_str = body.map(|v| v.to_string()).unwrap_or_default();
     let request = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body_str.len(), body_str
+        body_str.len(),
+        body_str
     );
 
     stream
@@ -356,23 +486,49 @@ fn send_json_request(
 fn ui(frame: &mut ratatui::Frame, app: &App) {
     let area = frame.area();
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(25),
-            Constraint::Length(8),
-            Constraint::Min(6),
-            Constraint::Length(1),
-        ])
-        .split(area);
+    if app.has_visible_completions() {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(25),
+                Constraint::Length(8),
+                Constraint::Length(8),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
 
-    render_form(frame, chunks[0], app);
-    render_steps(frame, chunks[1], app);
-    render_status(frame, chunks[2], app);
-    frame.render_widget(
-        Paragraph::new("q: quit | Tab/Shift+Tab: focus | Enter: action | Space: toggle checkbox"),
-        chunks[3],
-    );
+        render_form(frame, chunks[0], app);
+        render_steps(frame, chunks[1], app);
+        render_path_completion(frame, chunks[2], app);
+        render_status(frame, chunks[3], app);
+        frame.render_widget(
+            Paragraph::new(
+                "q: quit | Tab/Shift+Tab: focus | Enter: action/accept | Up/Down: completion | Space: toggle checkbox",
+            ),
+            chunks[4],
+        );
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(25),
+                Constraint::Length(8),
+                Constraint::Min(6),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        render_form(frame, chunks[0], app);
+        render_steps(frame, chunks[1], app);
+        render_status(frame, chunks[2], app);
+        frame.render_widget(
+            Paragraph::new(
+                "q: quit | Tab/Shift+Tab: focus | Enter: action | Space: toggle checkbox",
+            ),
+            chunks[3],
+        );
+    }
 }
 
 fn render_form(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -450,10 +606,7 @@ fn render_form(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let bottom = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(rows[7]);
 
     render_input(
@@ -491,9 +644,7 @@ fn render_steps(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         };
 
         let prefix = if app.focus == focus { ">" } else { " " };
-        items.push(ListItem::new(format!(
-            "{prefix} [{label}] - {step_state}"
-        )));
+        items.push(ListItem::new(format!("{prefix} [{label}] - {step_state}")));
     }
     let run_all_prefix = if app.focus == Focus::BtnRunAll {
         ">"
@@ -510,6 +661,45 @@ fn render_steps(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 .title("Actions")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        area,
+    );
+}
+
+fn render_path_completion(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let cwd = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .display()
+        .to_string();
+
+    let visible_count = area.height.saturating_sub(2) as usize;
+    let start = app
+        .selected_completion
+        .saturating_sub(visible_count.saturating_sub(1));
+
+    let mut items = Vec::new();
+    for (idx, path) in app
+        .path_completions
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_count)
+    {
+        let item = if idx == app.selected_completion {
+            ListItem::new(format!("> {path}"))
+                .style(Style::default().fg(Color::Yellow).bg(Color::DarkGray))
+        } else {
+            ListItem::new(format!("  {path}"))
+        };
+        items.push(item);
+    }
+
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .title(format!("Path Completion (cwd: {cwd})"))
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Magenta)),
         ),
         area,
     );
@@ -573,6 +763,7 @@ fn run_app() -> Result<(), String> {
     let mut terminal = Terminal::new(backend).map_err(|e| format!("terminal init failed: {e}"))?;
 
     let mut app = App::default();
+    app.update_path_completions();
     let tick_rate = Duration::from_millis(250);
     let mut last_tick = Instant::now();
 
@@ -591,8 +782,19 @@ fn run_app() -> Result<(), String> {
 
             match key.code {
                 KeyCode::Char('q') => break Ok(()),
-                KeyCode::Tab => app.move_focus(true),
-                KeyCode::BackTab => app.move_focus(false),
+                KeyCode::Tab => {
+                    app.move_focus(true);
+                    app.update_path_completions();
+                }
+                KeyCode::BackTab => {
+                    app.move_focus(false);
+                    app.update_path_completions();
+                }
+                KeyCode::Up if app.has_visible_completions() => app.select_prev_completion(),
+                KeyCode::Down if app.has_visible_completions() => app.select_next_completion(),
+                KeyCode::Enter if app.has_visible_completions() => {
+                    app.apply_selected_completion();
+                }
                 KeyCode::Enter => match app.focus {
                     Focus::EnableLogging => {
                         app.enable_logging = !app.enable_logging;
@@ -614,11 +816,13 @@ fn run_app() -> Result<(), String> {
                 KeyCode::Backspace => {
                     if let Some(current) = app.focused_value_mut() {
                         current.pop();
+                        app.update_path_completions();
                     }
                 }
                 KeyCode::Char(c) => {
                     if let Some(current) = app.focused_value_mut() {
                         current.push(c);
+                        app.update_path_completions();
                     }
                 }
                 _ => {}
