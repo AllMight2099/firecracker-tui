@@ -496,6 +496,7 @@ fn ui(frame: &mut ratatui::Frame, app: &App) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(2),
                 Constraint::Length(25),
                 Constraint::Length(8),
                 Constraint::Length(8),
@@ -504,20 +505,27 @@ fn ui(frame: &mut ratatui::Frame, app: &App) {
             ])
             .split(area);
 
-        render_form(frame, chunks[0], app);
-        render_steps(frame, chunks[1], app);
-        render_path_completion(frame, chunks[2], app);
-        render_status(frame, chunks[3], app);
+        frame.render_widget(
+            Paragraph::new("Firecracker TUI")
+                .style(Style::default().fg(Color::Cyan).bold())
+                .block(Block::default().borders(Borders::BOTTOM)),
+            chunks[0],
+        );
+        render_form(frame, chunks[1], app);
+        render_steps(frame, chunks[2], app);
+        render_path_completion(frame, chunks[3], app);
+        render_status(frame, chunks[4], app);
         frame.render_widget(
             Paragraph::new(
                 "Ctrl+C: quit | Tab/Shift+Tab: focus | Enter: action/accept | Up/Down: completion | Space: toggle checkbox",
             ),
-            chunks[4],
+            chunks[5],
         );
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(2),
                 Constraint::Length(25),
                 Constraint::Length(8),
                 Constraint::Min(6),
@@ -525,14 +533,20 @@ fn ui(frame: &mut ratatui::Frame, app: &App) {
             ])
             .split(area);
 
-        render_form(frame, chunks[0], app);
-        render_steps(frame, chunks[1], app);
-        render_status(frame, chunks[2], app);
+        frame.render_widget(
+            Paragraph::new("Firecracker TUI")
+                .style(Style::default().fg(Color::Cyan).bold())
+                .block(Block::default().borders(Borders::BOTTOM)),
+            chunks[0],
+        );
+        render_form(frame, chunks[1], app);
+        render_steps(frame, chunks[2], app);
+        render_status(frame, chunks[3], app);
         frame.render_widget(
             Paragraph::new(
                 "Ctrl+C: quit | Tab/Shift+Tab: focus | Enter: action | Space: toggle checkbox",
             ),
-            chunks[3],
+            chunks[4],
         );
     }
 }
