@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -98,7 +98,8 @@ impl Default for App {
             focus: Focus::SocketPath,
             steps: [StepState::NotRun; STEP_COUNT],
             status_lines: vec![
-                "Ready. Use Tab/Shift+Tab to navigate, Enter to run action, q to quit.".to_string(),
+                "Ready. Use Tab/Shift+Tab to navigate, Enter to run action, Ctrl+C to quit."
+                    .to_string(),
             ],
             path_completions: Vec::new(),
             selected_completion: 0,
@@ -202,7 +203,12 @@ impl App {
             let mut candidate = if base_dir == Path::new(".") {
                 name
             } else {
-                format!("{}/{}", base_dir.display(), name)
+                let base_str = base_dir.display().to_string();
+                if base_str.ends_with('/') {
+                    format!("{}{}", base_str, name)
+                } else {
+                    format!("{}/{}", base_str, name)
+                }
             };
 
             if file_type.is_dir() {
@@ -504,7 +510,7 @@ fn ui(frame: &mut ratatui::Frame, app: &App) {
         render_status(frame, chunks[3], app);
         frame.render_widget(
             Paragraph::new(
-                "q: quit | Tab/Shift+Tab: focus | Enter: action/accept | Up/Down: completion | Space: toggle checkbox",
+                "Ctrl+C: quit | Tab/Shift+Tab: focus | Enter: action/accept | Up/Down: completion | Space: toggle checkbox",
             ),
             chunks[4],
         );
@@ -524,7 +530,7 @@ fn ui(frame: &mut ratatui::Frame, app: &App) {
         render_status(frame, chunks[2], app);
         frame.render_widget(
             Paragraph::new(
-                "q: quit | Tab/Shift+Tab: focus | Enter: action | Space: toggle checkbox",
+                "Ctrl+C: quit | Tab/Shift+Tab: focus | Enter: action | Space: toggle checkbox",
             ),
             chunks[3],
         );
@@ -781,7 +787,7 @@ fn run_app() -> Result<(), String> {
             }
 
             match key.code {
-                KeyCode::Char('q') => break Ok(()),
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break Ok(()),
                 KeyCode::Tab => {
                     app.move_focus(true);
                     app.update_path_completions();
@@ -809,6 +815,12 @@ fn run_app() -> Result<(), String> {
                     Focus::BtnRunAll => app.run_all_steps(),
                     _ => {}
                 },
+                KeyCode::Char(' ')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        || key.modifiers.contains(KeyModifiers::SUPER) =>
+                {
+                    app.update_path_completions();
+                }
                 KeyCode::Char(' ') if app.focus == Focus::EnableLogging => {
                     app.enable_logging = !app.enable_logging;
                     app.push_status(format!("Logging enabled: {}", app.enable_logging));
